@@ -1,139 +1,184 @@
 // Uncomment for serial monitor and LED debug
 // #define DEBUG // SERIAL DOES NOT WORK ON ATTiny
 
-#ifdef DEBUG  
-  #define PIN_LED_A 5
-  #define PIN_LED_B 6
-#endif
+#define PIN_REC_INSIDE 0 // IR RECEIVER A
+#define PIN_REC_DOOR 2   // IR RECEIVER B
+#define PIN_RELAY 4      // RELAY to turn on/off
 
-#define PIN_REC_A A3    // IR RECEIVER A 
-#define PIN_REC_B A2    // IR RECEIVER B
-#define PIN_RELAY 2     // RELAY to turn on/off 
+int people = 0;
+bool recActiveInside = false;
+bool recActiveDoor = false;
 
-#define THRESHOLD_A 40  // Minimal distance of Receiver A (for noise)
-#define THRESHOLD_B 40  // Minimal distance of Receiver B (for noise)
-
-int count = 0;
-bool recActiveA = false;
-bool recActiveB = false;
-
-enum State {
+enum State
+{
   NONE,
   BOTH,
-  ENTERING,
-  LEAVING
+  DOOR,
+  INSIDE
 };
+
+const int PAST_LEN = 3;
+State pastStates[PAST_LEN] = {NONE, NONE, NONE}; // FIFO of state changes
 
 State firstState = NONE;
 State lastState = NONE;
 
-void setup() {  
-  pinMode(PIN_REC_A, INPUT);
-  pinMode(PIN_REC_B, INPUT);
+void setup()
+{
+  pinMode(PIN_REC_INSIDE, INPUT);
+  pinMode(PIN_REC_DOOR, INPUT);
   pinMode(PIN_RELAY, OUTPUT);
+
+  digitalWrite(PIN_RELAY, HIGH);
+
+  delay(1000);
+
+  while (digitalRead(PIN_REC_INSIDE) == HIGH || digitalRead(PIN_REC_DOOR) == HIGH)
+  {
+    delay(100);
+  }
 
   digitalWrite(PIN_RELAY, LOW);
 
-#ifdef DEBUG  
-  pinMode(PIN_LED_A, OUTPUT);
-  pinMode(PIN_LED_B, OUTPUT);
-
-  digitalWrite(PIN_LED_A, HIGH);
-  digitalWrite(PIN_LED_B, HIGH);
-
+#ifdef DEBUG
   Serial.begin(9600);
   Serial.println("READY");
 #endif
 }
 
-void readReceivers() {
-  recActiveA = analogRead(PIN_REC_A) > THRESHOLD_A ? true : false;
-  recActiveB = analogRead(PIN_REC_B) > THRESHOLD_B ? true : false;
-
-#ifdef DEBUG  
-  digitalWrite(PIN_LED_A, recActiveA ? LOW : HIGH);
-  digitalWrite(PIN_LED_B, recActiveB ? LOW : HIGH);
-
-  Serial.print("A: ");
-  Serial.print(analogRead(PIN_REC_A));
-  Serial.print(" | B: ");
-  Serial.println(analogRead(PIN_REC_B));
-#endif
+void readReceivers()
+{
+  recActiveInside = digitalRead(PIN_REC_INSIDE) == HIGH ? true : false;
+  recActiveDoor = digitalRead(PIN_REC_DOOR) == HIGH ? true : false;
 }
 
-State getState() {
-  if (recActiveA && recActiveB) {
+State getState()
+{
+  if (recActiveInside && recActiveDoor)
+  {
     return BOTH;
   }
 
-  if (recActiveA && !recActiveB) {
-    return ENTERING;
+  if (recActiveInside && !recActiveDoor)
+  {
+    return INSIDE;
   }
 
-  if (!recActiveA && recActiveB) {
-    return LEAVING;
+  if (!recActiveInside && recActiveDoor)
+  {
+    return DOOR;
   }
 
   return NONE;
-} 
-
-bool hasEntered() {
-  return lastState == ENTERING && firstState == LEAVING;
 }
 
-bool hasLeft() {
-  return lastState == LEAVING && firstState == ENTERING;
+bool hasEntered()
+{
+  return pastStates[1] == DOOR && pastStates[0] == BOTH;
 }
 
-void resetStates() {
-  firstState = NONE;
-  lastState = NONE;
+bool hasLeft()
+{
+  return pastStates[1] == INSIDE && pastStates[0] == BOTH;
 }
 
-void loop() {
-  readReceivers();
-  State newState = getState();
+void resetStates()
+{
+  for (byte i = 0; i < PAST_LEN; i++)
+  {
+    pastStates[i] = NONE;
+  }
+}
 
-  if (newState == lastState || newState == BOTH) {
-    return; // ignore both on or non changed states
+bool storeState(State newState)
+{
+  if (pastStates[0] == newState)
+  { // latest state is the same as new
+    return false;
   }
 
-  if (newState == NONE) {
-    if (firstState == NONE || lastState == NONE) {
+  for (byte i = PAST_LEN - 1; i > 0; i--)
+  {
+    pastStates[i] = pastStates[i - 1];
+  }
+
+  pastStates[0] = newState;
+
+  return true;
+}
+
+void printStates()
+{
+#ifdef DEBUG
+  Serial.print(" > ");
+
+  for (byte i = 0; i < PAST_LEN; i++)
+  {
+    switch (pastStates[i])
+    {
+    case NONE:
+      Serial.print(" NONE ");
+      break;
+    case BOTH:
+      Serial.print(" BOTH ");
+      break;
+    case DOOR:
+      Serial.print(" DOOR ");
+      break;
+    case INSIDE:
+      Serial.print("INSIDE");
+      break;
+    }
+
+    if (i < PAST_LEN - 1)
+      Serial.print(" | ");
+  }
+  Serial.println(" < ");
+#endif
+}
+
+void loop()
+{
+  readReceivers();
+  State currentState = getState();
+
+  if (storeState(currentState))
+  {
+    printStates();
+
+    if (hasEntered())
+    {
+      people++;
+
+#ifdef DEBUG
+      Serial.print("ENTER ");
+      Serial.println(people);
+#endif
+    }
+
+    if (hasLeft())
+    {
+      if (people > 0)
+        people--;
+
+#ifdef DEBUG
+      Serial.print("LEAVE ");
+      Serial.println(people);
+#endif
+    }
+
+    if (pastStates[0] == INSIDE && pastStates[1] == NONE && people == 0)
+    {
+      // HACK: when it fails for some reason and there is someone inside
+      people = 1;
+    }
+
+    if (people > 0)
+    {
+      digitalWrite(PIN_RELAY, HIGH);
       return;
     }
 
-    if (hasEntered()) {
-      if (count == 0) digitalWrite(PIN_RELAY, HIGH);
-      count++;
-
-#ifdef DEBUG  
-      Serial.print("ENTER ");
-      Serial.println(count);
-#endif
-    }
-    
-    if (hasLeft()) {
-      if (count == 1) digitalWrite(PIN_RELAY, LOW);      
-      if (count > 0) count--;
-
-#ifdef DEBUG  
-      Serial.print("LEAVE ");
-      Serial.println(count);
-#endif
-    }
-
-    resetStates();
-    return;
-  }
-
-  if (firstState == NONE) {
-    firstState = newState;
-    return;
-  }
-
-  if (lastState == NONE && firstState != newState) {
-    lastState = newState;
-    return;
+    digitalWrite(PIN_RELAY, LOW);
   }
 }
